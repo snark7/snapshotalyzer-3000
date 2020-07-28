@@ -14,4 +14,7 @@ AWS cli
 
 ## running
 
-`pipenv run python shotty/shotty.py`
+`pipenv run python shotty/shotty.py <command> <--project=PROJECT>`
+
+_command_ is a list, start, or stop
+_project_ is optional

@@ -6,7 +6,7 @@ session = boto3.Session(profile_name='shotty')
 ec2 = session.resource('ec2')
 
 
-def filter_instances(project):
+def filter_instances(project, instanceId):
     instances = []
 
     if project:
@@ -14,6 +14,9 @@ def filter_instances(project):
         instances = ec2.instances.filter(Filters=filters)
     else:
         instances = ec2.instances.all()
+
+    if instanceId:
+        instances = [i for i in instances if i.id == instanceId]
 
     return instances
 
@@ -24,8 +27,14 @@ def has_pending_snapshot(volume):
 
 
 @click.group()
-def cli():
+@click.option('--profile', default="shotty",
+              help="specify an AWS cli profile")
+def cli(profile):
     """Shotty manages snapshots"""
+    print("cli(profile) = {0}".format(profile))
+    session = boto3.Session(profile_name=profile)
+    ec2 = session.resource('ec2')
+    return
 
 
 @cli.group('snapshots')
@@ -38,9 +47,11 @@ def snapshots():
               help="Only snapshots for project (tag Project:<name>)")
 @click.option('--all', 'list_all', default=False, is_flag=True,
               help="List all snapshots")
-def list_snapshots(project, list_all):
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def list_snapshots(project, list_all, instanceId):
     "List EC2 snapshots"
-    instances = filter_instances(project)
+    instances = filter_instances(project, instanceId)
     for i in instances:
         for v in i.volumes.all():
             for s in v.snapshots.all():
@@ -66,9 +77,13 @@ def volumes():
 @volumes.command('list')
 @click.option('--project', default=None,
               help="Only volumes for project (tag Project:<name>)")
-def list_volumes(project):
+@click.option('--instance', default=None, type=str,
+              help="Only volumes for project (tag Project:<name>)")
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def list_volumes(project, instanceId):
     "List EC2 volumes"
-    instances = filter_instances(project)
+    instances = filter_instances(project, instanceId)
 
     for i in instances:
         for v in i.volumes.all():
@@ -90,9 +105,11 @@ def instances():
 @instances.command('list')
 @click.option('--project', default=None,
               help="Only instance for project (tag Project:<name>)")
-def list_instances(project):
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def list_instances(project, instanceId):
     "List EC2 instances"
-    instances = filter_instances(project)
+    instances = filter_instances(project, instanceId)
 
     for i in instances:
         tags = {t['Key']: t['Value'] for t in i.tags or []}
@@ -110,9 +127,17 @@ def list_instances(project):
 @instances.command('stop')
 @click.option('--project', default=None,
               help="Stop instances for project (tag Project:<name>)")
-def stop_instances(project):
+@click.option('--force', 'force', default=False, is_flag=True,
+              help="If --project is not set, exit command immediately unless --force is set")
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def stop_instances(project, force, instanceId):
     "Stop EC2 instances"
-    instances = filter_instances(project)
+    if not project and not force:
+        print("-project must be set unless --force=True")
+        return
+
+    instances = filter_instances(project, instanceId)
 
     for i in instances:
         print("Stopping {0}...".format(i.id))
@@ -128,9 +153,17 @@ def stop_instances(project):
 @instances.command('start')
 @click.option('--project', default=None,
               help="Start instances for project (tag Project:<name>)")
-def start_instances(project):
+@click.option('--force', 'force', default=False, is_flag=True,
+              help="If --project is not set, exit command immediately unless --force is set")
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def start_instances(project, force, instanceId):
     "Start EC2 instances"
-    instances = filter_instances(project)
+    if not project and not force:
+        print("-project must be set unless --force=True")
+        return
+
+    instances = filter_instances(project, instanceId)
 
     for i in instances:
         print("Starting {0}...".format(i.id))
@@ -143,30 +176,76 @@ def start_instances(project):
     return
 
 
-@instances.command('snapshot')
-@click.option('--project', default=None,
-              help="Only instances for project (tag Project:<name>)")
-def create_snapshots(project):
-    instances = filter_instances(project)
+@ instances.command('snapshot')
+@ click.option('--project', default=None,
+               help="Only instances for project (tag Project:<name>)")
+@ click.option('--force', 'force', default=False, is_flag=True,
+               help="If --project is not set, exit command immediately unless --force is set")
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def create_snapshots(project, force, instanceId):
+    "Create snapshot of volumes attached to EC2 instances"
+    if not project and not force:
+        print("-project must be set unless --force=True")
+        return
+
+    instances = filter_instances(project, instanceId)
 
     for i in instances:
-        print("Stopping {0}".format(i.id))
-        i.stop()
-        i.wait_until_stopped()
-        for v in i.volumes.all():
-            if has_pending_snapshot(v):
-                print(" Skipping {0}, snapshot already in progress".format(v.id))
-                continue
-            print("Creating snapshot of {0}".format(v.id))
-            v.create_snapshot(Description="Created by Shotty")
+        try:
+            restart = True
+            if i.state == 'stopped':
+                restart = False
+            print("Stopping {0}".format(i.id))
+            i.stop()
+            i.wait_until_stopped()
+            for v in i.volumes.all():
+                if has_pending_snapshot(v):
+                    print(
+                        " Skipping {0}, snapshot already in progress".format(v.id))
+                    continue
+                print("Creating snapshot of {0}".format(v.id))
+                v.create_snapshot(Description="Created by Shotty")
 
-        print("Starting {0}".format(i.id))
-        i.start()
-        i.wait_until_running()
+            print("Starting {0}".format(i.id))
+            if restart:
+                i.start()
+                i.wait_until_running()
+        except botocore.exceptions.ClientError as e:
+            print("Error creating snapshot {0} ".format(i.id) + str(e))
+            continue
 
     print("Job Done")
 
     return
+
+
+@ instances.command('reboot')
+@ click.option('--project', default=None,
+               help="Only instances for project (tag Project:<name>)")
+@ click.option('--force', 'force', default=False, is_flag=True,
+               help="If --project is not set, exit command immediately unless --force is set")
+@click.option('--instance', 'instanceId', default=None, type=str,
+              help="Target a specific EC2 instance by Id")
+def reboot_instances(project, force, instanceId):
+    "Reboot EC2 instances"
+    if not project and not force:
+        print("-project must be set unless --force=True")
+        return
+
+    instances = filter_instances(project, instanceId)
+
+    for i in instances:
+        print("Rebooting {0}".format(i.id))
+        print("Stopping {0}".format(i.id))
+        i.stop()
+        i.wait_until_stopped()
+        print("Restarting {0}".format(i.id))
+        i.start()
+        i.wait_until_running()
+        print("Reboot for {0} complete".format(i.id))
+
+    print("Rebooting complete")
 
 
 if __name__ == '__main__':
